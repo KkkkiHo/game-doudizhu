@@ -109,7 +109,8 @@
   </div>
   <div class="lucky-row">
     <button id="lucky-btn" type="button">🍀 靚牌模式：關</button>
-    <span>開咗之後，下一局你把把都係王炸加炸彈。</span>
+    <button id="auto-btn" type="button">🤖 托管：關</button>
+    <span>托管開咗，電腦會幫你叫牌同出牌。</span>
   </div>
   <div id="table">
     <div class="play-zone" id="zone-left"><div class="who">阿左</div><div class="play-cards" id="play-left"></div></div>
@@ -434,7 +435,14 @@ if (typeof module !== "undefined" && module.exports) {
 if (typeof document !== "undefined" && document.getElementById("hand")) {
   var $ = function (id) { return document.getElementById(id); };
   var NAMES = ["你", "阿右", "阿左"];
-  var G = null, gameId = 0, selected = {}, luckyMode = false;
+  var G = null, gameId = 0, selected = {}, luckyMode = false, autoMode = false, autoToken = 0;
+  function autoBidValue(hand, bid) {
+    var strength = handStrength(hand);
+    if (bid === 0) return strength >= 6 ? 1 : 0;
+    if (bid === 1 && strength >= 9) return 2;
+    if (bid === 2 && strength >= 13) return 3;
+    return 0;
+  }
   function teamOf(p) { return p === G.landlord ? "L" : "P"; }
   function setStatus(t) { $("status").textContent = t || ""; }
   function cardEl(card, mini) {
@@ -543,7 +551,7 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
   function biddingUI() {
     if (G.phase !== "bidding") return;
     var me = G.bidIdx;
-    if (me === 0) {
+    if (me === 0 && !autoMode) {
       if (G.bid === 0) {
         setActions([
           { label: "叫地主", primary: true, onClick: function () { applyBid(0, 1); } },
@@ -559,17 +567,14 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
         setStatus("而家 " + G.bid + " 分，輪到你：搶定唔搶？");
       }
     } else {
-      setActions([{ label: "等緊 " + NAMES[me] + " 叫牌…", disabled: true }]);
-      setStatus("等緊 " + NAMES[me] + " 叫牌…");
-      var token = gameId;
+      var whoName = me === 0 ? "托管" : NAMES[me];
+      setActions([{ label: "等緊 " + whoName + " 叫牌…", disabled: true }]);
+      setStatus("等緊 " + whoName + " 叫牌…");
+      var token = gameId, atoken = autoToken;
       setTimeout(function () {
         if (token !== gameId || G.phase !== "bidding" || G.bidIdx !== me) return;
-        var strength = handStrength(G.hands[me]);
-        var val = 0;
-        if (G.bid === 0) { if (strength >= 6) val = 1; }
-        else if (G.bid === 1 && strength >= 9) val = 2;
-        else if (G.bid === 2 && strength >= 13) val = 3;
-        applyBid(me, val);
+        if (me === 0 && (!autoMode || atoken !== autoToken)) return;
+        applyBid(me, autoBidValue(G.hands[me], G.bid));
       }, 750 + Math.random() * 500);
     }
   }
@@ -613,7 +618,18 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
   function startTurn() {
     if (G.phase !== "playing") return;
     renderPlays(); renderHand();
-    if (G.current === 0) {
+    if (G.current === 0 && autoMode) {
+      setActions([{ label: "托管中，電腦幫你出牌…", disabled: true }]);
+      setStatus("托管中，電腦幫你出牌…");
+      var token2 = gameId, atoken2 = autoToken;
+      setTimeout(function () {
+        if (token2 !== gameId || atoken2 !== autoToken || !autoMode || G.phase !== "playing" || G.current !== 0) return;
+        selected = {};
+        var cards = choosePlay(G.hands[0], ctxFor(0));
+        if (cards && cards.length) playCards(0, cards);
+        else passPlay(0);
+      }, 800 + Math.random() * 500);
+    } else if (G.current === 0) {
       if (!G.lastCombo) {
         setActions([
           { label: "提示", onClick: hintPlay },
@@ -722,6 +738,16 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
     } else {
       setStatus(luckyMode ? "靚牌模式已開，下一局生效。" : "靚牌模式已關，下一局回復正常發牌。");
     }
+  });
+  $("auto-btn").addEventListener("click", function () {
+    autoMode = !autoMode;
+    autoToken++;
+    this.textContent = autoMode ? "🤖 托管：開" : "🤖 托管：關";
+    this.classList.toggle("on", autoMode);
+    if (!G) return;
+    if (G.phase === "bidding" && G.bidIdx === 0) biddingUI();
+    else if (G.phase === "playing" && G.current === 0) startTurn();
+    else setStatus(autoMode ? "托管已開，輪到你嗰陣電腦會幫你出牌。" : "托管已關，輪到你嗰陣自己出牌。");
   });
   newGame();
 }
