@@ -346,78 +346,460 @@ function handStrength(hand) {
   else if (g[16]) score += 2;
   return score;
 }
-/* ctx: { last, lastPlayer, landlord, me } */
-function choosePlay(hand, ctx) {
-  var last = ctx.last;
-  var whole = analyze(hand);
-  // going out in one play
-  if (whole && (!last || beats(whole, last))) {
-    var solo = !last || true;
-    if (solo) return whole.cards;
-  }
-  var sameTeam = ctx.lastPlayer !== null && ctx.lastPlayer !== undefined && ctx.landlord !== undefined &&
-    ((ctx.lastPlayer === ctx.landlord) === (ctx.me === ctx.landlord));
-  // don't beat partner's play unless going out (handled above)
-  if (last && sameTeam) return null;
-  if (!last) {
-    // lead: lowest single, else pair, triple, straight, pairs chain, plane, bomb
-    var s1 = firstSingle(hand, [], 0);
-    if (s1) {
-      // avoid breaking a bomb/quad with a lone single if a smaller plain single exists: prefer rank with count 1
-      var g0 = groupByRank(hand), plain = null;
-      sortHand(hand.slice()).forEach(function (c) { if (!plain && g0[c.rank].length === 1) plain = [c]; });
-      return plain || s1;
-    }
-    var pr = firstPair(hand, 0); if (pr) return pr;
-    var g = groupByRank(hand), ranks = Object.keys(g).map(Number).sort(function (a, b) { return a - b; });
-    for (var i = 0; i < ranks.length; i++) if (g[ranks[i]].length >= 3) return g[ranks[i]].slice(0, 3);
-    var st = straightCards(hand, 5, 0); if (st) return st;
-    var pc = pairsChainCards(hand, 3, 0); if (pc) return pc;
-    var pl = planeCards(hand, 2, 0, "none"); if (pl) return pl;
-    var bomb = lowestBomb(hand, 0); if (bomb) return bomb;
-    return hand.slice();
-  }
-  var main = last.main, out = null;
-  if (last.type === "single") out = firstSingle(hand, [], main);
-  else if (last.type === "pair") out = firstPair(hand, main);
-  else if (last.type === "triple") out = lowestOf(hand, nextRankWith(hand, 3, main), 3);
-  else if (last.type === "straight") out = straightCards(hand, last.cards.length, main);
-  else if (last.type === "pairs") out = pairsChainCards(hand, last.chain, main);
-  else if (last.type === "plane") out = planeCards(hand, last.chain, main, "none");
-  else if (last.type === "triple1") {
-    var tr = nextRankWith(hand, 3, main);
-    if (tr) { var wing = firstSingle(hand, [tr], 0); if (wing) out = lowestOf(hand, tr, 3).concat(wing); }
-  } else if (last.type === "triple2") {
-    var tr2 = nextRankWith(hand, 3, main);
-    if (tr2) { var wp = firstPairExcluding(hand, [tr2]); if (wp) out = lowestOf(hand, tr2, 3).concat(wp); }
-  } else if (last.type === "plane1") {
-    out = planeCards(hand, last.chain, main, "single");
-  } else if (last.type === "plane2") {
-    out = planeCards(hand, last.chain, main, "pair");
-  } else if (last.type === "four2" || last.type === "four2pair") {
-    var qr = nextRankWith(hand, 4, main);
-    if (qr) {
-      var quad = lowestOf(hand, qr, 4);
-      if (last.type === "four2") { var w1 = firstSingle(hand, [qr], 0); var rest1 = hand.filter(function (c) { return c.rank !== qr && (!w1 || c.rank !== w1[0].rank); }); var w2 = firstSingle(rest1, [qr], 0); if (w1 && w2) out = quad.concat(w1, w2); }
-      else { var wp2 = firstPairExcluding(hand, [qr]); if (wp2) { var rest2 = hand.filter(function (c) { return c.rank !== qr && c.rank !== wp2[0].rank; }); var wp3 = firstPair(rest2, 0); if (wp3) out = quad.concat(wp2, wp3); } }
-    }
-  } else if (last.type === "bomb") {
-    out = lowestBomb(hand, main);
-    return out;
-  } else if (last.type === "rocket") {
-    return null;
-  }
-  if (out) return out;
-  // bomb rescue when threatened
-  if (last.type !== "bomb" && last.type !== "rocket") {
-    var bomb2 = lowestBomb(hand, 0);
-    if (bomb2) {
-      var threatened = ctx.lastPlayerCards !== undefined && ctx.lastPlayerCards <= 2;
-      if (threatened || hand.length <= 6) return bomb2;
-    }
-  }
-  return null;
+/* ---------- Strong AI: hand planning, card memory, teamwork ---------- */
+function countsOf(cards) {
+  var counts = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  cards.forEach(function (c) { counts[c.rank - 3]++; });
+  return counts;
 }
+function countsKey(counts) { return counts.join(","); }
+function countsTotal(counts) { var t = 0, i; for (i = 0; i < counts.length; i++) t += counts[i]; return t; }
+
+/* All legal single-play moves from a counts state, as resulting counts. */
+function movesFromCounts(counts) {
+  var moves = [], i, s, len, r;
+  if (counts[13] >= 1 && counts[14] >= 1) { var d0 = counts.slice(); d0[13]--; d0[14]--; moves.push(d0); }
+  for (i = 0; i < 13; i++) if (counts[i] === 4) { var db = counts.slice(); db[i] = 0; moves.push(db); }
+  for (i = 0; i < 15; i++) {
+    if (counts[i] >= 1) { var d1 = counts.slice(); d1[i]--; moves.push(d1); }
+    if (counts[i] >= 2) { var d2 = counts.slice(); d2[i] -= 2; moves.push(d2); }
+    if (counts[i] >= 3) { var d3 = counts.slice(); d3[i] -= 3; moves.push(d3); }
+  }
+  for (i = 0; i < 13; i++) if (counts[i] >= 3) {
+    var singles = [], pairs = [];
+    for (r = 0; r < 15; r++) if (r !== i) {
+      if (counts[r] === 1) singles.push(r);
+      else if (counts[r] >= 2) { singles.push(r); pairs.push(r); }
+    }
+    singles.sort(function (a, b) { return counts[a] - counts[b] || a - b; });
+    pairs.sort(function (a, b) { return counts[a] - counts[b] || a - b; });
+    if (singles.length) { var dt1 = counts.slice(); dt1[i] -= 3; dt1[singles[0]]--; moves.push(dt1); }
+    if (pairs.length) { var dt2 = counts.slice(); dt2[i] -= 3; dt2[pairs[0]] -= 2; moves.push(dt2); }
+  }
+  for (s = 0; s <= 11; s++) {
+    for (len = 5; s + len - 1 <= 11; len++) {
+      var ok = true;
+      for (r = s; r < s + len; r++) if (counts[r] < 1) { ok = false; break; }
+      if (!ok) break;
+      var ds = counts.slice();
+      for (r = s; r < s + len; r++) ds[r]--;
+      moves.push(ds);
+    }
+  }
+  for (s = 0; s <= 11; s++) {
+    for (len = 3; s + len - 1 <= 11; len++) {
+      var ok2 = true;
+      for (r = s; r < s + len; r++) if (counts[r] < 2) { ok2 = false; break; }
+      if (!ok2) break;
+      var dp = counts.slice();
+      for (r = s; r < s + len; r++) dp[r] -= 2;
+      moves.push(dp);
+    }
+  }
+  for (s = 0; s <= 11; s++) {
+    for (len = 2; s + len - 1 <= 11; len++) {
+      var ok3 = true;
+      for (r = s; r < s + len; r++) if (counts[r] < 3) { ok3 = false; break; }
+      if (!ok3) break;
+      var base = counts.slice();
+      for (r = s; r < s + len; r++) base[r] -= 3;
+      moves.push(base);
+      var rest = [];
+      for (r = 0; r < 15; r++) if ((r < s || r >= s + len) && base[r] > 0) rest.push(r);
+      rest.sort(function (a, b) { return base[a] - base[b] || a - b; });
+      if (rest.length >= len) {
+        var dw1 = base.slice();
+        for (var w = 0; w < len; w++) dw1[rest[w]]--;
+        moves.push(dw1);
+      }
+      var restP = rest.filter(function (x) { return base[x] >= 2; });
+      if (restP.length >= len) {
+        var dw2 = base.slice();
+        for (var w2 = 0; w2 < len; w2++) dw2[restP[w2]] -= 2;
+        moves.push(dw2);
+      }
+    }
+  }
+  for (i = 0; i < 13; i++) if (counts[i] === 4) {
+    var restS = [];
+    for (r = 0; r < 15; r++) if (r !== i && counts[r] > 0) restS.push(r);
+    restS.sort(function (a, b) { return counts[a] - counts[b] || a - b; });
+    if (restS.length >= 2) { var df1 = counts.slice(); df1[i] = 0; df1[restS[0]]--; df1[restS[1]]--; moves.push(df1); }
+    var restP2 = restS.filter(function (x) { return counts[x] >= 2; });
+    if (restP2.length >= 2) { var df2 = counts.slice(); df2[i] = 0; df2[restP2[0]] -= 2; df2[restP2[1]] -= 2; moves.push(df2); }
+  }
+  return moves;
+}
+
+/* Fast greedy estimate of plays needed (upper bound), used for big hands. */
+function greedyGroups(counts) {
+  var c = counts.slice(), plays = 0, guard = 0;
+  while (countsTotal(c) > 0 && guard++ < 30) {
+    var moves = movesFromCounts(c), best = null, bestRemoved = -1, total = countsTotal(c);
+    for (var i = 0; i < moves.length; i++) {
+      var removed = total - countsTotal(moves[i]);
+      if (removed > bestRemoved) { bestRemoved = removed; best = moves[i]; }
+    }
+    c = best; plays++;
+  }
+  return plays;
+}
+
+var GROUP_CACHE = {};
+var GROUP_CACHE_SIZE = 0;
+var GROUP_NODES = 0;
+function minTurnsFromCounts(counts) {
+  var key = countsKey(counts);
+  if (GROUP_CACHE[key] !== undefined) return GROUP_CACHE[key];
+  var total = countsTotal(counts);
+  if (total === 0) return 0;
+  if (total === 1) { GROUP_CACHE[key] = 1; GROUP_CACHE_SIZE++; return 1; }
+  if (total === 2) {
+    var v = 1;
+    for (var i = 0; i < 15; i++) if (counts[i] === 1) v = 2;
+    GROUP_CACHE[key] = v; GROUP_CACHE_SIZE++;
+    return v;
+  }
+  GROUP_NODES++;
+  if (GROUP_NODES > 4000) return greedyGroups(counts);
+  var moves = movesFromCounts(counts), best = Infinity;
+  for (var j = 0; j < moves.length; j++) {
+    var cand = 1 + minTurnsFromCounts(moves[j]);
+    if (cand < best) best = cand;
+    if (best === 1) break;
+  }
+  GROUP_CACHE[key] = best; GROUP_CACHE_SIZE++;
+  return best;
+}
+/* Minimum plays to shed the whole hand (exact search for small hands,
+   greedy estimate for big ones). */
+function handGroups(hand) {
+  if (!hand.length) return 0;
+  if (hand.length > 11) return greedyGroups(countsOf(hand));
+  GROUP_NODES = 0;
+  if (GROUP_CACHE_SIZE > 20000) { GROUP_CACHE = {}; GROUP_CACHE_SIZE = 0; }
+  return minTurnsFromCounts(countsOf(hand));
+}
+/* Cheaper estimate used inside per-candidate scoring. */
+function estimateGroups(hand) {
+  if (!hand.length) return 0;
+  if (hand.length > 11) return quickGroups(countsOf(hand));
+  return handGroups(hand);
+}
+/* One-pass greedy decomposition over rank groups (fast, deterministic). */
+function quickGroups(counts) {
+  var c = counts.slice(), plays = 0, i, s, len, r;
+  if (c[13] && c[14]) { c[13]--; c[14]--; plays++; }
+  for (i = 0; i < 13; i++) if (c[i] === 4) { c[i] = 0; plays++; }
+  var changed = true;
+  while (changed) {
+    changed = false;
+    var bestS = -1, bestLen = 1;
+    for (s = 0; s <= 11; s++) {
+      len = 0;
+      while (s + len <= 11 && c[s + len] >= 3) len++;
+      if (len > bestLen) { bestLen = len; bestS = s; }
+    }
+    if (bestLen >= 2) {
+      var wingSingles = [];
+      for (r = 0; r < 15; r++) if ((r < bestS || r >= bestS + bestLen) && c[r] > 0) wingSingles.push(r);
+      for (r = bestS; r < bestS + bestLen; r++) c[r] -= 3;
+      var attached = 0;
+      wingSingles.sort(function (a, b) { return c[a] - c[b] || a - b; });
+      for (i = 0; i < wingSingles.length && attached < bestLen; i++) { c[wingSingles[i]]--; attached++; }
+      plays++; changed = true; continue;
+    }
+    bestS = -1; bestLen = 2;
+    for (s = 0; s <= 11; s++) {
+      len = 0;
+      while (s + len <= 11 && c[s + len] >= 2) len++;
+      if (len > bestLen) { bestLen = len; bestS = s; }
+    }
+    if (bestLen >= 3) {
+      for (r = bestS; r < bestS + bestLen; r++) c[r] -= 2;
+      plays++; changed = true; continue;
+    }
+    bestS = -1; bestLen = 4;
+    for (s = 0; s <= 11; s++) {
+      len = 0;
+      while (s + len <= 11 && c[s + len] >= 1) len++;
+      if (len > bestLen) { bestLen = len; bestS = s; }
+    }
+    if (bestLen >= 5) {
+      for (r = bestS; r < bestS + bestLen; r++) c[r]--;
+      plays++; changed = true;
+    }
+  }
+  for (i = 0; i < 15; i++) {
+    while (c[i] >= 3) {
+      var used = 3; c[i] -= 3;
+      var wing = -1;
+      for (r = 0; r < 15; r++) if (r !== i && c[r] === 1) { wing = r; break; }
+      if (wing >= 0) { c[wing]--; used++; }
+      else {
+        for (r = 0; r < 15; r++) if (r !== i && c[r] >= 2) { c[r] -= 2; used += 2; break; }
+      }
+      plays++;
+    }
+  }
+  for (i = 0; i < 15; i++) { plays += Math.floor(c[i] / 2) + (c[i] % 2); }
+  return plays;
+}
+
+function removeCards(hand, combo) {
+  var ids = {};
+  combo.forEach(function (c) { ids[c.id] = true; });
+  return hand.filter(function (c) { return !ids[c.id]; });
+}
+function quadRanks(hand) {
+  var g = groupByRank(hand), out = [];
+  Object.keys(g).forEach(function (r) { if (g[r].length === 4) out.push(Number(r)); });
+  return out;
+}
+function singleIsUnbeatable(rank, unseen) {
+  if (!unseen) return false;
+  var r, i;
+  for (r = rank + 1; r <= 17; r++) if (unseen[r - 3] > 0) return false;
+  for (i = 0; i < 13; i++) if (unseen[i] >= 4) return false;
+  if (unseen[13] > 0 && unseen[14] > 0) return false;
+  return true;
+}
+
+/* Every legal play extractable from the hand. lean=true limits
+   triple attachment wing choices (faster scoring). */
+function allCombos(hand, lean) {
+  var g = groupByRank(hand), out = [], seenKeys = {};
+  function add(cards) {
+    if (!cards || !cards.length) return;
+    var c = analyze(cards);
+    if (!c) return;
+    var key = c.cards.map(function (x) { return x.id; }).sort(function (a, b) { return a - b; }).join(",");
+    if (seenKeys[key]) return;
+    seenKeys[key] = true;
+    out.push(c.cards);
+  }
+  var ranks = Object.keys(g).map(Number).sort(function (a, b) { return a - b; });
+  var s, len, r, k;
+  ranks.forEach(function (rk) {
+    add([g[rk][0]]);
+    if (g[rk].length >= 2) add(g[rk].slice(0, 2));
+    if (g[rk].length >= 3) add(g[rk].slice(0, 3));
+    if (g[rk].length === 4) add(g[rk].slice());
+  });
+  if (g[16] && g[17]) add([g[16][0], g[17][0]]);
+  ranks.forEach(function (rk) {
+    if (g[rk].length < 3) return;
+    var triple = g[rk].slice(0, 3);
+    var others = ranks.filter(function (w) { return w !== rk; });
+    if (lean) {
+      if (others.length) add(triple.concat([g[others[0]][0]]));
+      for (var i = 0; i < others.length; i++) if (g[others[i]].length >= 2) { add(triple.concat(g[others[i]].slice(0, 2))); break; }
+    } else {
+      others.forEach(function (w) {
+        add(triple.concat([g[w][0]]));
+        if (g[w].length >= 2) add(triple.concat(g[w].slice(0, 2)));
+      });
+    }
+  });
+  for (s = 3; s <= 14; s++) {
+    for (len = 5; s + len - 1 <= 14; len++) {
+      var cards = [], ok = true;
+      for (r = s; r < s + len; r++) { if (!g[r] || !g[r].length) { ok = false; break; } cards.push(g[r][0]); }
+      if (!ok) break;
+      add(cards);
+    }
+  }
+  for (s = 3; s <= 14; s++) {
+    for (k = 3; s + k - 1 <= 14; k++) {
+      var cards2 = [], ok2 = true;
+      for (r = s; r < s + k; r++) { if (!g[r] || g[r].length < 2) { ok2 = false; break; } cards2.push(g[r][0], g[r][1]); }
+      if (!ok2) break;
+      add(cards2);
+    }
+  }
+  for (s = 3; s <= 14; s++) {
+    for (k = 2; s + k - 1 <= 14; k++) {
+      var tripleRanks = [], cards3 = [], ok3 = true;
+      for (r = s; r < s + k; r++) { if (!g[r] || g[r].length < 3) { ok3 = false; break; } cards3.push(g[r][0], g[r][1], g[r][2]); tripleRanks.push(r); }
+      if (!ok3) break;
+      add(cards3);
+      var rest = hand.filter(function (c) { return tripleRanks.indexOf(c.rank) === -1; });
+      var wingSingles = [], seenR = {};
+      sortHand(rest.slice()).forEach(function (c) { if (wingSingles.length < k && !seenR[c.rank]) { seenR[c.rank] = true; wingSingles.push(c); } });
+      if (wingSingles.length === k) add(cards3.concat(wingSingles));
+      var rg = groupByRank(rest), pranks = Object.keys(rg).map(Number).sort(function (a, b) { return a - b; }), wingPairs = [];
+      pranks.forEach(function (pr) { if (rg[pr].length >= 2) wingPairs.push(rg[pr][0], rg[pr][1]); });
+      if (wingPairs.length >= 2 * k) add(cards3.concat(wingPairs.slice(0, 2 * k)));
+    }
+  }
+  ranks.forEach(function (rk) {
+    if (g[rk].length !== 4) return;
+    var quad = g[rk].slice();
+    var rest2 = hand.filter(function (c) { return c.rank !== rk; });
+    var ws = [], seenR2 = {};
+    sortHand(rest2.slice()).forEach(function (c) { if (ws.length < 2 && !seenR2[c.rank]) { seenR2[c.rank] = true; ws.push(c); } });
+    if (ws.length === 2) add(quad.concat(ws));
+    var rg2 = groupByRank(rest2), pr2 = Object.keys(rg2).map(Number).sort(function (a, b) { return a - b; }), wp = [];
+    pr2.forEach(function (pr) { if (rg2[pr].length >= 2) wp.push(rg2[pr][0], rg2[pr][1]); });
+    if (wp.length >= 4) add(quad.concat(wp.slice(0, 4)));
+  });
+  add(hand.slice());
+  return out;
+}
+
+/* Bidding: bid up to the level the hand's shape can support. */
+function bidValue(hand, bid) {
+  var groups = handGroups(hand);
+  var g = groupByRank(hand), bombs = 0;
+  Object.keys(g).forEach(function (r) { if (g[r].length === 4) bombs++; });
+  if (g[16] && g[17]) bombs++;
+  var control = bombs * 2 + (g[15] || []).length + (g[16] || []).length + (g[17] || []).length;
+  if (bid === 0) {
+    if (groups <= 7) return 1;
+    if (groups === 8 && control >= 4) return 1;
+    if (groups === 9 && control >= 6) return 1;
+    return 0;
+  }
+  if (bid === 1) {
+    if (groups <= 6) return 2;
+    if (groups === 7 && control >= 4) return 2;
+    if (groups === 8 && control >= 6) return 2;
+    return 0;
+  }
+  if (bid === 2) {
+    if (groups <= 5) return 3;
+    if (groups === 6 && control >= 4) return 3;
+    if (groups === 7 && control >= 6) return 3;
+    return 0;
+  }
+  return 0;
+}
+
+/* ctx: { last, lastPlayer, landlord, me, lastPlayerCards, counts, unseen } */
+function choosePlay(hand, ctx) {
+  ctx = ctx || {};
+  var last = ctx.last || null;
+  var me = (ctx.me === undefined ? 0 : ctx.me);
+  var landlord = ctx.landlord;
+  var counts = ctx.counts || null;
+  var unseen = ctx.unseen || null;
+  var partner = -1, p;
+  if (landlord !== undefined && me !== landlord) {
+    for (p = 0; p < 3; p++) if (p !== me && p !== landlord) partner = p;
+  }
+  function handCount(seat) {
+    if (counts) return counts[seat];
+    if (seat === ctx.lastPlayer) return ctx.lastPlayerCards;
+    return undefined;
+  }
+  function sameTeam(seat) {
+    if (landlord === undefined || seat === null || seat === undefined || seat < 0) return false;
+    return (seat === landlord) === (me === landlord);
+  }
+  /* 1) Go out in one play. */
+  var whole = analyze(hand);
+  if (whole && (!last || beats(whole, last))) return whole.cards;
+  var cands = allCombos(hand, true);
+  if (!cands.length) return null;
+  if (last) {
+    var lastSeat = ctx.lastPlayer;
+    /* 2) Partner played: feed them, never beat them -- unless the
+       landlord is about to go out on this very lead and only a
+       bomb/rocket from us can deny it. */
+    if (sameTeam(lastSeat)) {
+      var oppCards = landlord !== undefined ? handCount(landlord) : undefined;
+      if (oppCards !== undefined && oppCards <= 2) {
+        var danger = (oppCards === 1 && last.type === "single") ||
+          (oppCards === 2 && (last.type === "single" || last.type === "pair"));
+        if (danger) {
+          var rescue = cands.filter(function (c) { var a = analyze(c); return (a.type === "bomb" || a.type === "rocket") && beats(a, last); });
+          if (rescue.length) {
+            rescue.sort(function (a, b) { return analyze(a).main - analyze(b).main; });
+            return rescue[0];
+          }
+        }
+      }
+      return null;
+    }
+    /* 3) Opponent played: beat it if we can, cheaply and safely. */
+    var beating = cands.filter(function (c) { return beats(analyze(c), last); });
+    if (!beating.length) {
+      var bombs = cands.filter(function (c) { var a = analyze(c); return (a.type === "bomb" || a.type === "rocket") && beats(a, last); });
+      if (bombs.length) {
+        var threat = handCount(lastSeat) !== undefined && handCount(lastSeat) <= 2;
+        var finishSoon = handGroups(hand) <= 3;
+        if (threat || finishSoon) {
+          bombs.sort(function (a, b) { return analyze(a).main - analyze(b).main; });
+          return bombs[0];
+        }
+      }
+      return null;
+    }
+    var lastCards = handCount(lastSeat);
+    var best = null, bestScore = Infinity;
+    beating.forEach(function (c) {
+      var a = analyze(c);
+      var rest = removeCards(hand, c);
+      var groups = estimateGroups(rest);
+      var score = groups * 100 + a.main;
+      if (a.type === "bomb" || a.type === "rocket") {
+        score += 40;
+        if (lastCards !== undefined && lastCards <= 2) score -= 80;
+        else if (groups >= 3) score += 40;
+      }
+      if (quadRanks(rest).length < quadRanks(hand).length && a.type !== "bomb" && a.type !== "rocket") score += 25;
+      if ((a.type === "single" || a.type === "pair") && a.main >= 15 && groups >= 2) score += 12;
+      if (a.main - last.main >= 4 && a.type !== "bomb" && a.type !== "rocket") score += 8;
+      if (groups === 1) {
+        var fin = analyze(rest);
+        if (fin && (fin.type === "bomb" || fin.type === "rocket")) score -= 30;
+        else if (fin && fin.type === "single" && singleIsUnbeatable(fin.main, unseen)) score -= 30;
+      }
+      if (score < bestScore) { bestScore = score; best = c; }
+    });
+    return best;
+  }
+  /* 4) Leading. */
+  var next = (me + 1) % 3;
+  var partnerCards = partner >= 0 ? handCount(partner) : undefined;
+  var nextCards = handCount(next);
+  /* Feed a partner who plays right after us and is about to go out. */
+  if (partner >= 0 && next === partner && partnerCards !== undefined && partnerCards <= 2) {
+    var g0 = groupByRank(hand), feed = null, i, j;
+    if (partnerCards === 2) {
+      var pairRanks = Object.keys(g0).map(Number).sort(function (x, y) { return x - y; });
+      for (i = 0; i < pairRanks.length; i++) if (g0[pairRanks[i]].length >= 2) { feed = g0[pairRanks[i]].slice(0, 2); break; }
+    }
+    if (!feed) {
+      var sorted = sortHand(hand.slice());
+      for (j = 0; j < sorted.length; j++) if (g0[sorted[j].rank].length === 1) { feed = [sorted[j]]; break; }
+      if (!feed) feed = [sorted[0]];
+    }
+    return feed;
+  }
+  var bestLead = null, bestLeadScore = Infinity;
+  cands.forEach(function (c) {
+    var a = analyze(c);
+    var rest = removeCards(hand, c);
+    var groups = estimateGroups(rest);
+    var score = groups * 100 + a.main * 0.5 - c.length * 1.5;
+    if (a.type === "bomb" || a.type === "rocket") score += 60;
+    if (a.type === "single" && a.main >= 15 && groups >= 1) score += 15;
+    if (quadRanks(rest).length < quadRanks(hand).length && a.type !== "bomb" && a.type !== "rocket") score += 25;
+    if (nextCards !== undefined && nextCards <= 2 && next !== partner) {
+      if (a.type === "single") score += 30;
+      if (a.type === "pair" || a.type === "pairs" || a.type === "plane" || a.type === "straight") score -= 10;
+    }
+    if (groups === 1) {
+      var fin2 = analyze(rest);
+      if (fin2 && (fin2.type === "bomb" || fin2.type === "rocket")) score -= 25;
+      else if (fin2 && fin2.type === "single" && singleIsUnbeatable(fin2.main, unseen)) score -= 25;
+    }
+    if (score < bestLeadScore) { bestLeadScore = score; bestLead = c; }
+  });
+  return bestLead || cands[0];
+}
+
 function nextRankWith(hand, count, minRank) {
   var g = groupByRank(hand), ranks = Object.keys(g).map(Number).sort(function (a, b) { return a - b; });
   for (var i = 0; i < ranks.length; i++) if (ranks[i] > minRank && g[ranks[i]].length >= count) return ranks[i];
@@ -453,7 +835,7 @@ function dealHands(deck, lucky) {
   return { hands: hands, bottom: bottom };
 }
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { makeDeck: makeDeck, shuffle: shuffle, sortHand: sortHand, analyze: analyze, beats: beats, choosePlay: choosePlay, handStrength: handStrength, groupByRank: groupByRank, comboName: comboName, RANK_LABEL: RANK_LABEL, dealHands: dealHands };
+  module.exports = { makeDeck: makeDeck, shuffle: shuffle, sortHand: sortHand, analyze: analyze, beats: beats, choosePlay: choosePlay, handStrength: handStrength, groupByRank: groupByRank, comboName: comboName, RANK_LABEL: RANK_LABEL, dealHands: dealHands, handGroups: handGroups, allCombos: allCombos, bidValue: bidValue };
 }
 
 /* ---------- Game UI ---------- */
@@ -462,11 +844,7 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
   var NAMES = ["你", "阿右", "阿左"];
   var G = null, gameId = 0, selected = {}, luckyMode = false, autoMode = false, autoToken = 0;
   function autoBidValue(hand, bid) {
-    var strength = handStrength(hand);
-    if (bid === 0) return strength >= 6 ? 1 : 0;
-    if (bid === 1 && strength >= 9) return 2;
-    if (bid === 2 && strength >= 13) return 3;
-    return 0;
+    return bidValue(hand, bid);
   }
   function teamOf(p) { return p === G.landlord ? "L" : "P"; }
   function setStatus(t) { $("status").textContent = t || ""; }
@@ -566,7 +944,7 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
       phase: "bidding", hands: dealt.hands, bottom: dealt.bottom, bottomShown: false,
       landlord: -1, current: 0, lastCombo: null, lastPlayer: -1, passCount: 0,
       lastPlays: [null, null, null], mult: 1, bombCount: 0,
-      plays: { L: 0, P: 0 }, bid: 0, bidIdx: 0, bidPasses: 0, lastBidder: -1
+      plays: { L: 0, P: 0 }, bid: 0, bidIdx: 0, bidPasses: 0, lastBidder: -1, seen: {}
     };
     selected = {};
     renderBottom(); renderHand(); renderPlays();
@@ -635,9 +1013,15 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
     startTurn();
   }
   function ctxFor(player) {
+    var counts = [G.hands[0].length, G.hands[1].length, G.hands[2].length];
+    var unseen = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1];
+    G.hands[player].forEach(function (c) { unseen[c.rank - 3]--; });
+    Object.keys(G.seen || {}).forEach(function (r) { unseen[r - 3] -= G.seen[r]; });
+    unseen = unseen.map(function (v) { return Math.max(0, v); });
     return {
       last: G.lastCombo, lastPlayer: G.lastPlayer, landlord: G.landlord, me: player,
-      lastPlayerCards: G.lastPlayer >= 0 ? G.hands[G.lastPlayer].length : undefined
+      lastPlayerCards: G.lastPlayer >= 0 ? G.hands[G.lastPlayer].length : undefined,
+      counts: counts, unseen: unseen
     };
   }
   function startTurn() {
@@ -710,7 +1094,7 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
   }
   function playCards(player, cards) {
     var ids = {};
-    cards.forEach(function (c) { ids[c.id] = true; });
+    cards.forEach(function (c) { ids[c.id] = true; G.seen[c.rank] = (G.seen[c.rank] || 0) + 1; });
     G.hands[player] = G.hands[player].filter(function (c) { return !ids[c.id]; });
     var c = analyze(cards);
     G.lastCombo = c;
