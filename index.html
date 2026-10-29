@@ -33,12 +33,12 @@
   .play-zone { flex: 1; background: rgba(0,0,0,.22); border-radius: 8px; padding: 6px; min-height: 96px; }
   .play-zone.turn { outline: 2px solid #ffca28; }
   .play-zone .who { font-size: 12px; color: #a5d6a7; margin-bottom: 4px; text-align: center; }
-  .play-cards { display: flex; flex-wrap: wrap; justify-content: center; }
+  .play-cards { display: flex; flex-wrap: wrap; justify-content: center; justify-content: safe center; }
   .play-cards .card { margin-left: -16px; }
   .play-cards .card:first-child { margin-left: 0; }
   .pass-label { text-align: center; font-size: 18px; font-weight: 800; color: #ffca28; padding-top: 18px; }
-  #hand { display: flex; justify-content: center; margin: 2px 0 10px; min-height: 84px; }
-  #hand .card { margin-left: -24px; cursor: pointer; transition: transform .1s; }
+  #hand { display: flex; justify-content: center; justify-content: safe center; margin: 2px 0 10px; min-height: 84px; }
+  #hand .card { margin-left: -26px; cursor: pointer; transition: transform .1s; }
   #hand .card:first-child { margin-left: 0; }
   #hand .card.selected { transform: translateY(-14px); outline: 3px solid #ffca28; }
   .card {
@@ -82,6 +82,31 @@
   .lucky-row { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; font-size: 13px; color: #a5d6a7; }
   .lucky-row button { font: inherit; cursor: pointer; border: 0; border-radius: 8px; padding: 7px 12px; font-weight: 700; background: #33691e; color: #fff; }
   .lucky-row button.on { background: #ffca28; color: #3e2700; }
+  /* Small screens: shrink cards and tighten the overlap so a full
+     17-card (or 20-card landlord) hand always fits inside the screen
+     instead of pushing the leftmost cards off the left edge, where
+     they could not be tapped. */
+  @media (max-width: 480px) {
+    .card { width: 40px; height: 58px; }
+    .card .r, .card .r2 { font-size: 13px; }
+    .card .r { left: 2px; }
+    .card .r2 { right: 2px; }
+    .card .s { font-size: 17px; top: 17px; }
+    .card.mini { width: 28px; height: 40px; }
+    .card.joker .r, .card.joker .r2 { font-size: 11px; }
+    .card.joker .s { font-size: 14px; }
+    #hand { min-height: 76px; }
+    #hand .card { margin-left: -24px; }
+    .play-cards .card { margin-left: -18px; }
+    #zone-me { min-height: 76px; }
+  }
+  @media (max-width: 360px) {
+    .card { width: 34px; height: 50px; }
+    .card .r, .card .r2 { font-size: 12px; }
+    .card .s { font-size: 15px; top: 15px; }
+    #hand .card { margin-left: -20px; }
+    .play-cards .card { margin-left: -16px; }
+  }
   .note { margin-top: 10px; font-size: 12px; color: #81c784; text-align: center; }
 </style>
 </head>
