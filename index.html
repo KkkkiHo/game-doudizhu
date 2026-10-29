@@ -79,6 +79,9 @@
     font: inherit; cursor: pointer; border: 0; border-radius: 8px;
     background: #ffca28; color: #3e2700; padding: 12px 26px; font-weight: 800; font-size: 17px;
   }
+  .lucky-row { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; font-size: 13px; color: #a5d6a7; }
+  .lucky-row button { font: inherit; cursor: pointer; border: 0; border-radius: 8px; padding: 7px 12px; font-weight: 700; background: #33691e; color: #fff; }
+  .lucky-row button.on { background: #ffca28; color: #3e2700; }
   .note { margin-top: 10px; font-size: 12px; color: #81c784; text-align: center; }
 </style>
 </head>
@@ -103,6 +106,10 @@
       <div>阿右 <span class="badge" id="badge-right"></span></div>
       <div>剩 <b id="count-right">17</b> 張</div>
     </div>
+  </div>
+  <div class="lucky-row">
+    <button id="lucky-btn" type="button">🍀 靚牌模式：關</button>
+    <span>開咗之後，下一局你把把都係王炸加炸彈。</span>
   </div>
   <div id="table">
     <div class="play-zone" id="zone-left"><div class="who">阿左</div><div class="play-cards" id="play-left"></div></div>
@@ -395,15 +402,39 @@ function firstPairExcluding(hand, excludeRanks) {
   for (var i = 0; i < ranks.length; i++) if (excludeRanks.indexOf(ranks[i]) === -1 && g[ranks[i]].length >= 2) return g[ranks[i]].slice(0, 2);
   return null;
 }
+/* Deal: normal random deal, or rigged "lucky" deal giving seat 0 a
+   rocket, a bomb of 2s, a bomb of Aces, triple Kings, a pair of Queens. */
+function dealHands(deck, lucky) {
+  var hands = [[], [], []], bottom = [], i;
+  if (lucky) {
+    var want = [[17, 1], [16, 1], [15, 4], [14, 4], [13, 3], [12, 2], [11, 1], [10, 1]];
+    var pool = deck.slice(), strong = [];
+    want.forEach(function (w) {
+      var found = pool.filter(function (c) { return c.rank === w[0]; }).slice(0, w[1]);
+      found.forEach(function (c) { strong.push(c); pool.splice(pool.indexOf(c), 1); });
+    });
+    shuffle(pool);
+    hands[0] = strong;
+    for (i = 0; i < 34; i++) hands[1 + (i % 2)].push(pool[i]);
+    bottom = pool.slice(34, 37);
+  } else {
+    var d = shuffle(deck.slice());
+    for (i = 0; i < 51; i++) hands[i % 3].push(d[i]);
+    bottom = d.slice(51);
+  }
+  hands.forEach(function (h) { sortHand(h); });
+  sortHand(bottom);
+  return { hands: hands, bottom: bottom };
+}
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { makeDeck: makeDeck, shuffle: shuffle, sortHand: sortHand, analyze: analyze, beats: beats, choosePlay: choosePlay, handStrength: handStrength, groupByRank: groupByRank, comboName: comboName, RANK_LABEL: RANK_LABEL };
+  module.exports = { makeDeck: makeDeck, shuffle: shuffle, sortHand: sortHand, analyze: analyze, beats: beats, choosePlay: choosePlay, handStrength: handStrength, groupByRank: groupByRank, comboName: comboName, RANK_LABEL: RANK_LABEL, dealHands: dealHands };
 }
 
 /* ---------- Game UI ---------- */
 if (typeof document !== "undefined" && document.getElementById("hand")) {
   var $ = function (id) { return document.getElementById(id); };
   var NAMES = ["你", "阿右", "阿左"];
-  var G = null, gameId = 0, selected = {};
+  var G = null, gameId = 0, selected = {}, luckyMode = false;
   function teamOf(p) { return p === G.landlord ? "L" : "P"; }
   function setStatus(t) { $("status").textContent = t || ""; }
   function cardEl(card, mini) {
@@ -497,16 +528,13 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
   }
   function newGame() {
     gameId++;
-    var deck = shuffle(makeDeck());
+    var dealt = dealHands(makeDeck(), luckyMode);
     G = {
-      phase: "bidding", hands: [[], [], []], bottom: [], bottomShown: false,
+      phase: "bidding", hands: dealt.hands, bottom: dealt.bottom, bottomShown: false,
       landlord: -1, current: 0, lastCombo: null, lastPlayer: -1, passCount: 0,
       lastPlays: [null, null, null], mult: 1, bombCount: 0,
       plays: { L: 0, P: 0 }, bid: 0, bidIdx: 0, bidPasses: 0, lastBidder: -1
     };
-    for (var i = 0; i < 51; i++) G.hands[i % 3].push(deck[i]);
-    G.bottom = deck.slice(51);
-    G.hands.forEach(function (h) { sortHand(h); });
     selected = {};
     renderBottom(); renderHand(); renderPlays();
     setStatus("輪到你叫地主：叫就做地主，唔叫就睇對手。");
@@ -684,6 +712,17 @@ if (typeof document !== "undefined" && document.getElementById("hand")) {
     var detail = role + "。\n最後倍數 " + G.mult + " 倍" + (spring ? "（春天，倍數加倍）" : "") + "。\n地主出過 " + G.plays.L + " 次牌，農民出過 " + G.plays.P + " 次牌。";
     showOverlay(userWon ? "你贏咗！" : "你輸咗…", detail, "再玩一局", newGame);
   }
+  $("lucky-btn").addEventListener("click", function () {
+    luckyMode = !luckyMode;
+    this.textContent = luckyMode ? "🍀 靚牌模式：開" : "🍀 靚牌模式：關";
+    this.classList.toggle("on", luckyMode);
+    if (G && G.phase === "bidding") {
+      setStatus(luckyMode ? "靚牌模式已開，重新發牌…" : "靚牌模式已關，重新發牌…");
+      newGame();
+    } else {
+      setStatus(luckyMode ? "靚牌模式已開，下一局生效。" : "靚牌模式已關，下一局回復正常發牌。");
+    }
+  });
   newGame();
 }
 </script>
